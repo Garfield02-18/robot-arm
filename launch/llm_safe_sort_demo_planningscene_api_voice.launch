@@ -54,7 +54,7 @@
   <!-- LLM 配置 -->
   <!-- ========================= -->
   <arg name="use_llm" default="true"/>
-  <arg name="llm_url" default="http://10.31.133.192:8910/v1"/>
+  <arg name="llm_url" default="http://127.0.0.1:8910/v1"/>
   <arg name="llm_model" default="DeepSeek-R1-Distill-Qwen-7B"/>
   <arg name="llm_timeout" default="15.0"/>
 

@@ -504,10 +504,10 @@ def detect_all(img, hsv_cfg, kb, yolo_model=None, conf_thres=0.4, min_area=1500,
 class LLMTaskParser:
     """
     大模型任务解析器
-    调用本地部署的 DeepSeek API 进行意图识别
+    调用 airbox 本地 Genie/OpenAI-compatible API 进行意图识别
     """
     def __init__(self, 
-                 base_url="http://10.31.133.192:8910/v1",
+                 base_url="http://127.0.0.1:8910/v1",
                  model="DeepSeek-R1-Distill-Qwen-7B",
                  timeout=20.0,
                  max_retries=3):
@@ -546,6 +546,8 @@ class LLMTaskParser:
             ],
             "stream": False,
             "temperature": 0.0,
+            "temp": 0.0,
+            "top_k": 1,
             "top_p": 1.0
         }
 
@@ -565,7 +567,7 @@ class LLMTaskParser:
                     continue
                 
                 result = response.json()
-                content = result["choices"][0]["message"]["content"]
+                content = result["choices"][0]["message"].get("content", "")
                 
                 # 清理可能的 markdown 代码块
                 content = self._clean_json_content(content)
@@ -598,14 +600,16 @@ class LLMTaskParser:
 
     def _clean_json_content(self, content):
         """清理 LLM 输出中可能存在的 markdown 标记"""
-        content = content.strip()
-        # 移除 ```json 和 ``` 标记
-        if content.startswith("```json"):
-            content = content[7:]
-        elif content.startswith("```"):
-            content = content[3:]
-        if content.endswith("```"):
-            content = content[:-3]
+        content = (content or "").strip()
+        content = re.sub(r"<think>.*?</think>", "", content, flags=re.DOTALL).strip()
+        content = re.sub(r"^```(?:json)?", "", content).strip()
+        content = re.sub(r"```$", "", content).strip()
+
+        start = content.find("{")
+        end = content.rfind("}")
+        if start != -1 and end != -1 and end > start:
+            content = content[start:end + 1]
+
         return content.strip()
 
     def _validate_tasks(self, parsed):
@@ -1097,7 +1101,7 @@ class Demo:
         
         # ========== 步骤 1: 先初始化 LLM 解析器 ==========
         self.use_llm = rospy.get_param("~use_llm", True)
-        llm_url = rospy.get_param("~llm_url", "http://10.31.133.192:8910/v1")
+        llm_url = rospy.get_param("~llm_url", "http://127.0.0.1:8910/v1")
         llm_model = rospy.get_param("~llm_model", "DeepSeek-R1-Distill-Qwen-7B")
         llm_timeout = rospy.get_param("~llm_timeout", 5.0)
         

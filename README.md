@@ -1,618 +1,303 @@
-# AIR5021 Team 15 —— 语音引导智能机械臂分拣系统
+## Airbox Reproduction Status
 
-> 基于 Sagittarius 机械臂平台，实现的语音交互、多模态感知、LLM 任务解析与 MoveIt PlanningScene 避障的一体化智能分拣系统。
-
----
-
-# 1. 项目简介
-
-本项目基于 `sagittarius_arm_ros` 机械臂平台，实现了一个桌面场景下的语音引导智能分拣系统。
-
-系统支持：
-
-* 语音输入
-* 实时录音
-* 自然语言任务解析
-* 多目标视觉识别
-* MoveIt PlanningScene 避障
-* 机械臂抓取与放置
-* 多任务顺序执行
-
-系统整体流程如下：
+The following pipeline has been verified on the Airbox Q900:
 
 ```text
-语音 / 文本指令
-        ↓
-Whisper 语音识别
-        ↓
-任务文本
-        ↓
-LLM / 本地规则解析
-        ↓
-结构化任务列表
-        ↓
-YOLO / HSV 混合视觉识别
-        ↓
-像素坐标 → 机械臂坐标
-        ↓
-PlanningScene 更新障碍物
-        ↓
-Sagittarius 机械臂抓取与放置
+Text task
+    ↓
+Airbox local model / local rule parser
+    ↓
+Structured task JSON
+    ↓
+RealSense 515 RGB image
+    ↓
+YOLO-World / HSV object detection
+    ↓
+Target robot-arm coordinates
+    ↓
+SGRCtrl action pick / place command
 ```
 
-本项目为 AIR5021 Final Project 最终版本。
+Verified items:
 
----
+* ROS1 Noetic Docker container: `team15-noetic`
+* Recommended reproduction workspace: `/home/radxa/team15_ws`
+* Airbox local model API: `http://127.0.0.1:8910/v1`
+* Text task parsing, for example `put the red block into area B` / `把红色方块放到B区`
+* YOLO-World weight loading: `models/yolov8s-worldv2.pt`
+* RealSense 515 RGB stream: `/dev/video6`
+* ROS image topic: `/usb_cam/image_raw`, about `16.6 Hz`
+* Single-frame YOLO-World detection
+* Robot-free dry run with `nodes/mock_sgr_ctrl_server.py`
 
-# 2. 项目目录
+Not yet verified:
 
-项目主要位于：
+* Live microphone input: the current Airbox does not detect the microphone device
+* Real Sagittarius arm pick and place execution
+
+Airbox-related files included in this package:
 
 ```text
-/home/robotics/team15/src/sagittarius_ws/src/sagittarius_arm_ros/sagittarius_perception/sagittarius_object_color_detector/
+src/
+├── CMakeLists.txt
+├── package.xml
+├── action/
+│   └── SGRCtrl.action
+├── config/
+│   ├── HSVParams.cfg
+│   └── vision_config.yaml
+├── launch/
+│   ├── llm_safe_sort_demo_planningscene_api_voice.launch
+│   └── usb_cam.launch
+├── models/
+│   └── yolov8s-worldv2.pt
+├── nodes/
+│   ├── llm_safe_sort_demo_planningscene_api_voice.py
+│   ├── mock_sgr_ctrl_server.py
+│   ├── sgr_ctrl.py
+│   └── voice_task_input.py
+└── scripts/
+    └── start_airbox_genie_service.sh
 ```
 
-常用目录说明：
+### Create a ROS1 Noetic Container
 
-```text
-sagittarius_object_color_detector/
-├── launch/        # ROS launch 文件
-├── nodes/         # 可执行 ROS 节点
-├── config/        # 配置文件
-├── scripts/       # 辅助脚本
-├── action/        # 自定义 Action
-└── ...
-```
+The Airbox system may already have ROS2 Jazzy installed. Do not remove the system ROS2 installation. Use Docker to create an isolated ROS1 Noetic environment instead.
 
----
-
-# 3. 环境要求
-
-推荐环境：
-
-* Ubuntu 20.04
-* ROS Noetic
-* Python 3
-* MoveIt
-* 已安装 `sagittarius_arm_ros`
-* 已完成 catkin 工作区编译
-
----
-
-# 4. 工作区初始化
-
-进入工作区：
+If the Airbox can access Docker Hub directly:
 
 ```bash
-cd /home/robotics/team15/src/sagittarius_ws
+sudo docker pull --platform linux/arm64 ros:noetic-ros-base-focal
 ```
 
-加载 ROS 环境：
+If Docker Hub access is unstable on the Airbox, prepare an arm64 rootfs on another Linux machine with working network access:
 
 ```bash
+sudo docker pull --platform linux/arm64 ros:noetic-ros-base-focal
+sudo docker create \
+  --platform linux/arm64 \
+  --name noetic-rootfs \
+  ros:noetic-ros-base-focal \
+  /bin/bash
+
+sudo docker export noetic-rootfs -o noetic-ros-base-focal-rootfs-arm64.tar
+sudo docker rm noetic-rootfs
+```
+
+Copy `noetic-ros-base-focal-rootfs-arm64.tar` to the Airbox, then import it on the Airbox:
+
+```bash
+sudo docker import \
+  /home/radxa/noetic-ros-base-focal-rootfs-arm64.tar \
+  ros:noetic-ros-base-focal-imported
+```
+
+Create the ROS1 container for Team15:
+
+```bash
+sudo docker run -it --name team15-noetic \
+  --platform linux/arm64 \
+  --network host \
+  --privileged \
+  -e DISPLAY=$DISPLAY \
+  -e QT_X11_NO_MITSHM=1 \
+  -v /tmp/.X11-unix:/tmp/.X11-unix \
+  -v /dev:/dev \
+  -v /home/radxa/Team15:/home/radxa/Team15 \
+  ros:noetic-ros-base-focal bash
+```
+
+If you are using the offline imported image, replace the last image line with:
+
+```bash
+ros:noetic-ros-base-focal-imported bash
+```
+
+Install dependencies inside the container on the first run:
+
+```bash
+apt update
+
+apt install -y \
+  git \
+  python3-pip \
+  python3-opencv \
+  v4l-utils \
+  libyaml-cpp-dev \
+  ros-noetic-catkin \
+  ros-noetic-cv-bridge \
+  ros-noetic-image-transport \
+  ros-noetic-usb-cam \
+  ros-noetic-smach \
+  ros-noetic-smach-ros \
+  ros-noetic-moveit \
+  ros-noetic-moveit-commander \
+  ros-noetic-controller-manager \
+  ros-noetic-robot-state-publisher \
+  ros-noetic-joint-state-publisher \
+  ros-noetic-joint-state-publisher-gui \
+  ros-noetic-rviz \
+  ros-noetic-xacro \
+  ros-noetic-joy \
+  ros-noetic-diagnostic-updater
+```
+
+Install the YOLO-World runtime dependency:
+
+```bash
+python3 -m pip install ultralytics==8.3.0 \
+  -i https://mirrors.aliyun.com/pypi/simple \
+  --trusted-host mirrors.aliyun.com \
+  --timeout 600 --retries 20 \
+  --progress-bar off
+```
+
+### Build the Team15 Workspace
+
+The `src` directory in this repository is itself the ROS package `sagittarius_object_color_detector`. Inside the container, create a catkin workspace and link this package into it:
+
+```bash
+source /opt/ros/noetic/setup.bash
+
+mkdir -p /home/radxa/team15_ws/src
+ln -sfn \
+  /home/radxa/Team15/Team15-FinalProject/src \
+  /home/radxa/team15_ws/src/sagittarius_object_color_detector
+
+cd /home/radxa/team15_ws
+catkin_make
 source devel/setup.bash
 ```
 
-检查 ROS 是否正确指向当前工作区：
+Verify that ROS can find the package:
 
 ```bash
 rospack find sagittarius_object_color_detector
 ```
 
----
+Expected output:
 
-# 5. 依赖安装
-
----
-
-## 5.1 安装 Whisper
-
-Whisper 用于语音识别：
-
-```bash
-pip3 install --user openai-whisper
+```text
+/home/radxa/team15_ws/src/sagittarius_object_color_detector
 ```
 
----
+### Airbox Local Model
 
-## 5.2 安装 OpenCC
-
-Whisper 有时会输出繁体中文，因此使用 OpenCC 做繁简转换：
+Start the local model service on the Airbox host:
 
 ```bash
-pip3 install --user opencc-python-reimplemented
+/home/radxa/Team15/Team15-FinalProject/src/scripts/start_airbox_genie_service.sh
 ```
 
----
-
-## 5.3 安装 FFmpeg
-
-Whisper 读取音频依赖 FFmpeg。
-
-检查：
+Verify it from inside the ROS1 container:
 
 ```bash
-ffmpeg -version
+curl http://127.0.0.1:8910/v1/models
 ```
 
-若未安装：
+The response should include models such as `DeepSeek-R1-Distill-Qwen-7B`.
+
+### Enter the ROS1 Container
+
+Start and attach to the existing Noetic container:
 
 ```bash
-sudo apt install ffmpeg
+sudo docker start -ai team15-noetic
 ```
 
----
-
-# 6. 编译项目
-
-如果修改了代码：
+From another terminal, enter the running container:
 
 ```bash
-cd /home/robotics/team15/src/sagittarius_ws
+sudo docker exec -it team15-noetic bash
+```
 
-catkin_make
+Initialize the ROS environment inside the container:
 
+```bash
+source /opt/ros/noetic/setup.bash
+cd /home/radxa/team15_ws
 source devel/setup.bash
 ```
 
----
+### YOLO-World Verification
 
-# 7. 启动方式
-
-最终版本 launch 文件：
-
-```text
-llm_safe_sort_demo_planningscene_api_voice.launch
-```
-
----
-
-## 7.1 使用音频文件启动
+Before running YOLO / torch, set:
 
 ```bash
-roslaunch sagittarius_object_color_detector \
-llm_safe_sort_demo_planningscene_api_voice.launch \
-audio_path:=/home/robotics/task.wav
+export LD_PRELOAD=$(find /usr/local/lib/python3.8/dist-packages -name 'libgomp*.so*' | head -1)
 ```
 
-系统会：
-
-1. 读取音频文件
-2. 调用 Whisper 识别文本
-3. 发布任务文本
-4. 执行智能分拣
-
----
-
-## 7.2 实时录音模式
-
-直接启动：
+Verify that the model can be loaded:
 
 ```bash
-roslaunch sagittarius_object_color_detector \
-llm_safe_sort_demo_planningscene_api_voice.launch
+python3 - <<'PY2'
+from ultralytics import YOLOWorld
+
+path = "/home/radxa/team15_ws/src/sagittarius_object_color_detector/models/yolov8s-worldv2.pt"
+model = YOLOWorld(path)
+model.set_classes(["block", "cube", "red block", "blue block", "green block", "cup", "banana"])
+print("YOLO-World model loaded OK")
+PY2
 ```
 
-随后根据终端提示进行实时录音。
+### Camera Verification
 
----
+The verified RealSense 515 RGB device is:
 
-## 7.3 直接输入文本任务
+```text
+/dev/video6
+```
+
+Start the image stream:
 
 ```bash
-roslaunch sagittarius_object_color_detector \
-llm_safe_sort_demo_planningscene_api_voice.launch \
-task_text:="把最左边的蓝色方块放到A区"
+roslaunch sagittarius_object_color_detector usb_cam.launch video_dev:=/dev/video6
 ```
 
-如果 `task_text` 非空，则优先使用文本任务，不等待语音输入。
-
----
-
-## 7.4 通过 ROS Topic 输入音频路径
-
-启动系统后：
+Verify the image topic from another container terminal:
 
 ```bash
-rostopic pub /voice_audio_path std_msgs/String \
-"data: '/home/robotics/task.wav'"
+rostopic hz /usb_cam/image_raw
 ```
 
----
+### Text-Input Dry Run
 
-# 8. 当前支持的任务类型
+When no real robot arm is available, use the mock action server to verify that control commands are generated.
 
----
-
-## 按颜色抓取
-
-```text
-把蓝色方块放到A区
-```
-
----
-
-## 按左右位置抓取
-
-```text
-把最左边的方块放到B区
-```
-
----
-
-## 颜色 + 方位组合
-
-```text
-把最左边的蓝色方块放到A区
-```
-
----
-
-## 多任务顺序执行
-
-```text
-把trash can放到B区，然后把cup放到D区
-```
-
----
-
-# 9. 语音识别模块
-
-语音识别节点：
-
-```text
-nodes/voice_task_input.py
-```
-
-功能包括：
-
-* 音频文件读取
-* 实时录音
-* Whisper 识别
-* OpenCC 繁简转换
-* 发布识别结果到：
-
-```text
-/voice_task_text
-```
-
-如果语音识别结果为空：
-
-* 系统会自动退回终端输入模式
-* 用户可手动输入任务文本
-
----
-
-# 10. LLM 任务解析
-
-系统支持：
-
-* LLM 任务解析
-* 本地规则解析 fallback
-
-推荐 LLM 返回格式：
-
-```json
-{
-  "tasks": [
-    {
-      "color": "blue",
-      "position": "left",
-      "place_name": "A"
-    }
-  ]
-}
-```
-
-若：
-
-* LLM API 调用失败
-* 输出格式错误
-* 网络异常
-
-则自动退回本地规则解析。
-
----
-
-# 11. 视觉识别系统
-
-当前系统使用：
-
-* YOLO 接口
-* HSV 颜色识别
-
-其中：
-
-## YOLO
-
-用于：
-
-* 多类别扩展
-* 开放词汇目标检测
-
-## HSV
-
-用于：
-
-* 彩色方块稳定识别
-* 颜色校验 fallback
-
-当前系统会：
-
-* 使用 YOLO 获取目标位置
-* 使用 HSV 验证目标颜色
-
----
-
-# 12. PlanningScene 避障
-
-抓取前系统会：
-
-* 将桌面加入 PlanningScene
-* 将非目标物体加入碰撞场景
-
-作用：
-
-* 提供基础避障能力
-* 提高路径规划真实性
-* 避免直接穿过障碍物
-
-如果 RViz 中能看到：
-
-* 桌面模型
-* 障碍物 collision box
-
-则通常说明 PlanningScene 已成功接入。
-
----
-
-# 13. 可调参数
-
----
-
-## 13.1 搜索位姿
-
-重要参数：
-
-```python
-goal_search.pos_x
-goal_search.pos_y
-goal_search.pos_z
-goal_search.pos_roll
-goal_search.pos_pitch
-goal_search.pos_yaw
-```
-
-推荐调整流程：
-
-1. 在 RViz 中手动调整机械臂
-2. 打印当前末端位姿
-3. 复制到搜索位姿函数中
-
----
-
-## 13.2 工作区范围
-
-代码中通常包含：
-
-```python
-def in_workspace(x, y):
-```
-
-如果经常出现：
-
-```text
-Target out of workspace
-```
-
-则需调整：
-
-* `x_min`
-* `x_max`
-* `y_min`
-* `y_max`
-
----
-
-## 13.3 障碍物尺寸
-
-PlanningScene 中可调整：
-
-* 桌面尺寸
-* 障碍物高度
-* inflate_scale
-
-若尺寸不合理，可能导致：
-
-* 规划失败
-* 避障效果不明显
-* 模型与真实物体不一致
-
----
-
-## 13.4 YOLO 参数
-
-常见参数：
-
-```python
-yolo_model_path
-conf_thres
-show_debug
-```
-
----
-
-# 14. 系统鲁棒性设计
-
-最终版本加入了多个保护机制：
-
-* ASR fallback
-* LLM fallback
-* 本地规则 fallback
-* 抓取失败后重新检测
-* 无效目标过滤
-* 工作区合法性检查
-* 规划失败重试
-* 终端手动输入 fallback
-
-这些机制显著提升了真实机械臂上的稳定性。
-
----
-
-# 15. 常见问题
-
----
-
-## roslaunch 找不到节点
-
-检查：
+Terminal 1: keep the camera running:
 
 ```bash
-chmod +x your_node.py
+roslaunch sagittarius_object_color_detector usb_cam.launch video_dev:=/dev/video6
 ```
 
-并确认 launch 中：
-
-```xml
-type=
-```
-
-与真实文件名一致。
-
----
-
-## exit code 127
-
-通常原因：
-
-* Windows 换行符
-* shebang 错误
-
-修复：
+Terminal 2: start the mock robot-arm action server:
 
 ```bash
-sed -i 's/\r$//' your_node.py
+rosrun sagittarius_object_color_detector mock_sgr_ctrl_server.py
 ```
 
----
+Terminal 3: start the main program with a text task:
 
-## 一直等待 `/get_planning_scene`
+```bash
+export LD_PRELOAD=$(find /usr/local/lib/python3.8/dist-packages -name 'libgomp*.so*' | head -1)
 
-通常是 MoveIt namespace 不一致。
+rosrun sagittarius_object_color_detector llm_safe_sort_demo_planningscene_api_voice.py \
+  _vision_config:=/home/radxa/team15_ws/src/sagittarius_object_color_detector/config/vision_config.yaml \
+  _arm_name:=sgr532 \
+  _task_text:="把蓝色方块放到B区" \
+  _use_llm:=true \
+  _llm_url:=http://127.0.0.1:8910/v1 \
+  _llm_model:=DeepSeek-R1-Distill-Qwen-7B \
+  _yolo_model_path:=/home/radxa/team15_ws/src/sagittarius_object_color_detector/models/yolov8s-worldv2.pt \
+  _show_debug:=false
+```
 
-例如机械臂 namespace 为：
+If the mock server terminal prints logs similar to the following, the text task has been converted into robot-arm control commands:
 
 ```text
-/sgr532
+[MockSGR] goal action=XYZ_RPY ...
+[MockSGR] goal action=PICK_XYZ pos=(...)
+[MockSGR] goal action=PUT_XYZ pos=(0.150, 0.240, 0.200)
 ```
 
-则：
-
-* robot_description
-* MoveIt namespace
-
-也必须对应 `/sgr532`。
-
----
-
-## 规划失败
-
-优先检查：
-
-* 搜索位姿
-* 工作区范围
-* 标定参数
-* 障碍物尺寸
-
----
-
-# 16. 后续改进方向
-
----
-
-## 完整 YOLO 部署
-
-当前仍保留 HSV fallback。
-
-后续可：
-
-* 完全替换为 YOLO
-* 支持更多类别
-* 提高复杂场景鲁棒性
-
----
-
-## RGB-D 三维避障
-
-当前使用简化 box 模型。
-
-后续可加入：
-
-* RGB-D 相机
-* 三维障碍物重建
-* 更精确碰撞模型
-
----
-
-## 连续语音对话
-
-后续可扩展：
-
-* 多轮对话
-* 歧义询问
-* 持续语音助手
-
----
-
-## 更完善任务管理
-
-未来可增加：
-
-* 任务队列持久化
-* 自动重试机制
-* 抓取成功验证
-* 动态优先级管理
-
----
-
-# 17. 项目亮点
-
-本项目主要亮点包括：
-
-* 语音引导机械臂交互
-* LLM 自然语言任务解析
-* YOLO / HSV 混合感知
-* MoveIt PlanningScene 避障
-* 多重 fallback 鲁棒性设计
-* 真实硬件完整运行
-* 模块化 ROS 架构
-
----
-
-# 18. 成员分工
-
-* **Peng Zhiyuan**
-  系统整体集成、PlanningScene、机械臂执行、调试
-
-* **Xu Xuanchen**
-  LLM 任务解析与结构化任务表示
-
-* **Liu Yibo**
-  YOLO 接口与实时录音功能
-
-* **Zhan Zihao**
-  调试、测试与系统支持
-
----
-
-# 19. 总结
-
-本项目最终实现了一个完整的：
-
-* ASR 语音识别
-* LLM 任务解析
-* 混合视觉感知
-* PlanningScene 避障
-* 真实机械臂抓取执行
-
-的一体化语音引导智能分拣系统，并成功运行于真实 Sagittarius 机械臂平台。
+The mock mode does not move any real object. After `PICK_XYZ` and `PUT_XYZ` appear, the dry run is considered successful.
