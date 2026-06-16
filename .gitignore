@@ -1,0 +1,21 @@
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# ROS / catkin build outputs
+build/
+devel/
+install/
+log/
+.catkin_tools/
+
+# Local runtime files
+.ros/
+*.bag
+*.log
+
+# OS / editor files
+.DS_Store
+.vscode/
+.idea/
