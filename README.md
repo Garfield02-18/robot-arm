@@ -423,4 +423,3 @@ The current Airbox reproduction has verified the perception and command-generati
 * Real Sagittarius robot-arm pick/place execution has not yet been verified in the current Airbox environment.
 * On another Airbox, `/dev/video6` may not be the RGB camera device. Always verify it with `v4l2-ctl`.
 
-For a detailed issue log, see `问题反馈.md`.
