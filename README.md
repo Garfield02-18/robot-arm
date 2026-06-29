@@ -1,4 +1,50 @@
-## Airbox Reproduction Status
+# Deployment Guide
+
+This repository is the Radxa Airbox adaptation of the voice-guided robotic sorting project. The goal of this version is not only to preserve the original ROS1 sorting pipeline, but also to make the project reproducible and deployable on a Radxa Airbox Q900 as an edge AI robot controller.
+
+In this deployment, the Airbox is the central device of the whole system. It runs the local LLM service, hosts the ROS1 Noetic Docker container, receives images from the RealSense 515 camera, performs object detection, and sends pick/place commands to the Sagittarius robot arm through ROS action messages.
+
+Before starting, please make sure you have read the relevant documentation for the Radxa Airbox Q900 https://docs.radxa.com/fogwise/airbox-q900
+
+## Demo Video
+
+The project demonstration video is available here:
+
+[Watch the demo video](demo/demo_cut.mp4)
+
+If your Markdown viewer supports embedded videos, it can also be played below:
+
+<video src="demo/demo_cut.mp4" controls width="100%">
+  Your browser does not support embedded video. Please use the link above to watch the demo.
+</video>
+
+## Why the Deployment Is Built Around Radxa Airbox
+
+The original project depends on ROS1 Noetic, MoveIt, camera input, natural-language task parsing, and robot-arm action control. The Airbox provides a compact edge-computing platform where these components can be deployed on one device:
+
+* The Airbox host keeps its original system environment, including ROS2 Jazzy if it is already installed.
+* A Docker container provides an isolated ROS1 Noetic runtime for the Team15 ROS package.
+* The Airbox local model service provides an OpenAI-compatible API at `http://127.0.0.1:8910/v1`.
+* USB devices such as the RealSense camera and robot-arm serial devices are passed into the container through `/dev`.
+* ROS nodes, MoveIt, YOLO-World, HSV detection, and action clients run inside the ROS1 container.
+* The local model service runs on the Airbox host, and the container accesses it through host networking.
+
+This design avoids replacing the system ROS environment on the Airbox and makes the ROS1 project easier to reproduce on different Airbox devices.
+
+## Airbox-Centered Runtime Architecture
+
+| Layer | Runs On | Responsibility |
+| --- | --- | --- |
+| Airbox host OS | Radxa Airbox Q900 | Docker daemon, USB devices, local model service, QAI/Genie environment |
+| Local model API | Airbox host | Converts natural-language instructions into structured task JSON |
+| ROS1 Noetic container | Docker on Airbox | Runs the catkin workspace, ROS nodes, MoveIt, YOLO-World, HSV detection, and action clients |
+| RealSense 515 | USB device on Airbox | Provides the RGB image stream, verified as `/dev/video6` |
+| Sagittarius robot arm | Connected through Airbox device interfaces | Receives `SGRCtrl` pick/place action commands |
+| Mock action server | ROS1 container | Used for dry-run verification when the real robot arm is unavailable |
+
+Important runtime detail: the local LLM is served by the Airbox local model stack, while YOLO-World currently runs through Ultralytics/PyTorch inside the ROS1 container. In this version, YOLO-World uses CPU inference, not the Airbox NPU. HSV detection and MoveIt also run on CPU.
+
+## Verified Pipeline on Airbox Q900
 
 The following pipeline has been verified on the Airbox Q900:
 
@@ -33,9 +79,30 @@ Verified items:
 Not yet verified:
 
 * Live microphone input: the current Airbox does not detect the microphone device
-* Real Sagittarius arm pick and place execution
+* Real Sagittarius robot-arm pick and place execution
 
-Airbox-related files included in this package:
+## Airbox Deployment Path Assumptions
+
+The commands below assume the following paths on the Airbox:
+
+```text
+/home/radxa/robot_arm/src
+/home/radxa/team15_ws
+/home/radxa/ai-engine-direct-helper
+/home/radxa/qairt
+/home/radxa/miniconda3/envs/llm
+```
+
+If another Airbox uses a different username or project path, update the Docker volume mount and the workspace symlink accordingly.
+
+The ROS1 container is launched with these key options:
+
+* `--network host`: allows ROS nodes inside the container to access the Airbox host local model API through `127.0.0.1:8910`.
+* `--privileged` and `-v /dev:/dev`: make camera and robot hardware devices visible inside the container.
+* `-v /home/radxa/robot_arm:/home/radxa/robot_arm`: shares the project files between the Airbox host and the container.
+* `-v /tmp/.X11-unix:/tmp/.X11-unix`: allows GUI tools such as RViz to use the host display when available.
+
+## Airbox-Related Files Included in This Package
 
 ```text
 src/
@@ -60,7 +127,7 @@ src/
     └── start_airbox_genie_service.sh
 ```
 
-### Create a ROS1 Noetic Container
+## Create a ROS1 Noetic Container on Airbox
 
 The Airbox system may already have ROS2 Jazzy installed. Do not remove the system ROS2 installation. Use Docker to create an isolated ROS1 Noetic environment instead.
 
@@ -103,7 +170,7 @@ sudo docker run -it --name team15-noetic \
   -e QT_X11_NO_MITSHM=1 \
   -v /tmp/.X11-unix:/tmp/.X11-unix \
   -v /dev:/dev \
-  -v /home/radxa/Team15:/home/radxa/Team15 \
+  -v /home/radxa/robot_arm:/home/radxa/robot_arm \
   ros:noetic-ros-base-focal bash
 ```
 
@@ -152,16 +219,16 @@ python3 -m pip install ultralytics==8.3.0 \
   --progress-bar off
 ```
 
-### Build the Team15 Workspace
+## Build the Team15 Workspace Inside the Airbox Container
 
-The `src` directory in this repository is itself the ROS package `sagittarius_object_color_detector`. Inside the container, create a catkin workspace and link this package into it:
+The `src` directory in this repository is itself the ROS package `sagittarius_object_color_detector`. After entering the container, create a catkin workspace and link this package into it:
 
 ```bash
 source /opt/ros/noetic/setup.bash
 
 mkdir -p /home/radxa/team15_ws/src
 ln -sfn \
-  /home/radxa/Team15/Team15-FinalProject/src \
+  /home/radxa/robot_arm/src \
   /home/radxa/team15_ws/src/sagittarius_object_color_detector
 
 cd /home/radxa/team15_ws
@@ -181,15 +248,15 @@ Expected output:
 /home/radxa/team15_ws/src/sagittarius_object_color_detector
 ```
 
-### Airbox Local Model
+## Start the Airbox Local Model Service
 
-Start the local model service on the Airbox host:
+The local model service should be started on the Airbox host, not inside the ROS1 container. The script uses the Airbox host-side Conda, QAI, and model paths.
 
 ```bash
-/home/radxa/Team15/Team15-FinalProject/src/scripts/start_airbox_genie_service.sh
+/home/radxa/robot_arm/src/scripts/start_airbox_genie_service.sh
 ```
 
-Verify it from inside the ROS1 container:
+Verify the service from inside the ROS1 container:
 
 ```bash
 curl http://127.0.0.1:8910/v1/models
@@ -197,7 +264,13 @@ curl http://127.0.0.1:8910/v1/models
 
 The response should include models such as `DeepSeek-R1-Distill-Qwen-7B`.
 
-### Enter the ROS1 Container
+Because the Docker container uses `--network host`, ROS nodes can directly call the Airbox host model API through:
+
+```text
+http://127.0.0.1:8910/v1
+```
+
+## Enter the ROS1 Container
 
 Start and attach to the existing Noetic container:
 
@@ -219,9 +292,24 @@ cd /home/radxa/team15_ws
 source devel/setup.bash
 ```
 
-### YOLO-World Verification
+## YOLO-World on Airbox
 
-Before running YOLO / torch, set:
+YOLO-World is loaded by the main ROS node from:
+
+```text
+models/yolov8s-worldv2.pt
+```
+
+The model path is passed through `launch/llm_safe_sort_demo_planningscene_api_voice.launch`:
+
+```xml
+<arg name="yolo_model_path"
+     default="$(find sagittarius_object_color_detector)/models/yolov8s-worldv2.pt"/>
+```
+
+At runtime, the main node reads one frame from `/usb_cam/image_raw`, converts it with `cv_bridge`, and calls Ultralytics/PyTorch inference. This process runs inside the ROS1 container and currently uses CPU inference.
+
+Before running YOLO / torch inside the Airbox container, set:
 
 ```bash
 export LD_PRELOAD=$(find /usr/local/lib/python3.8/dist-packages -name 'libgomp*.so*' | head -1)
@@ -240,29 +328,42 @@ print("YOLO-World model loaded OK")
 PY2
 ```
 
-### Camera Verification
+## Camera Deployment on Airbox
 
-The verified RealSense 515 RGB device is:
+On the tested Airbox, the RealSense 515 RGB device is:
 
 ```text
 /dev/video6
 ```
 
-Start the image stream:
+On another Airbox or after changing the camera, confirm the device first:
+
+```bash
+v4l2-ctl --list-devices
+v4l2-ctl -d /dev/video6 --list-formats-ext
+```
+
+Start the image stream inside the ROS1 container:
 
 ```bash
 roslaunch sagittarius_object_color_detector usb_cam.launch video_dev:=/dev/video6
 ```
 
-Verify the image topic from another container terminal:
+From another container terminal, verify the image topic:
 
 ```bash
 rostopic hz /usb_cam/image_raw
 ```
 
-### Text-Input Dry Run
+On the tested Airbox, `/usb_cam/image_raw` runs at about `16.6 Hz`.
 
-When no real robot arm is available, use the mock action server to verify that control commands are generated.
+## Text-Input Dry Run on Airbox
+
+When no real robot arm is available, use the mock action server to verify that the Airbox can run the complete software control chain:
+
+```text
+Text task -> local model / rule parser -> vision result -> SGRCtrl pick/place action
+```
 
 Terminal 1: keep the camera running:
 
@@ -300,4 +401,26 @@ If the mock server terminal prints logs similar to the following, the text task 
 [MockSGR] goal action=PUT_XYZ pos=(0.150, 0.240, 0.200)
 ```
 
-The mock mode does not move any real object. After `PICK_XYZ` and `PUT_XYZ` appear, the dry run is considered successful.
+The mock mode does not move any real object. After `PICK_XYZ` and `PUT_XYZ` appear, the dry run can be considered successful.
+
+## Real Robot Deployment Notes
+
+For a real Sagittarius robot-arm deployment, the main launch file starts:
+
+* `sagittarius_moveit/launch/demo_true.launch`
+* `sgr_ctrl.py` as the `/sgr532/sgr_ctrl` action server
+* `usb_cam.launch` for camera input
+* `voice_task_input.py` for voice/text task input
+* `llm_safe_sort_demo_planningscene_api_voice.py` for task parsing, object detection, PlanningScene updates, and pick/place orchestration
+
+The current Airbox reproduction has verified the perception and command-generation path. Real robot-arm motion still requires hardware-side validation, including calibration, workspace range, gripper behavior, and safety boundaries.
+
+## Known Limitations
+
+* YOLO-World currently runs on CPU through PyTorch inside the ROS1 container. It has not been converted to the Airbox NPU/QNN runtime.
+* The local LLM service depends on Airbox host-side QAI/Genie paths and is therefore Airbox-specific.
+* The tested Type-C microphone was not detected by the Airbox, so live voice input has not yet been verified.
+* Real Sagittarius robot-arm pick/place execution has not yet been verified in the current Airbox environment.
+* On another Airbox, `/dev/video6` may not be the RGB camera device. Always verify it with `v4l2-ctl`.
+
+For a detailed issue log, see `问题反馈.md`.

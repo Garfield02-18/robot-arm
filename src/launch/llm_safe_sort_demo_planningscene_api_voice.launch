@@ -1,0 +1,122 @@
+<?xml version="1.0"?>
+<launch>
+
+  <!-- ========================= -->
+  <!-- 机械臂配置 -->
+  <!-- ========================= -->
+  <arg name="robot_name" default="sgr532"/>
+  <arg name="robot_model" default="$(arg robot_name)"/>
+
+  <!-- 启动真实机械臂 + MoveIt -->
+  <include file="$(find sagittarius_moveit)/launch/demo_true.launch" />
+
+  <!-- 控制节点 Action Server -->
+  <node pkg="sagittarius_object_color_detector"
+        type="sgr_ctrl.py"
+        name="sgr_ctrl_node"
+        output="screen"
+        ns="$(arg robot_name)"/>
+
+  <!-- ========================= -->
+  <!-- 摄像头 -->
+  <!-- ========================= -->
+  <arg name="video_dev" default="/dev/usb_cam" />
+
+  <include file="$(find sagittarius_object_color_detector)/launch/usb_cam.launch">
+    <arg name="video_dev" value="$(arg video_dev)"/>
+  </include>
+
+  <!-- ========================= -->
+  <!-- 基础配置 -->
+  <!-- ========================= -->
+  <arg name="vision_config"
+       default="$(find sagittarius_object_color_detector)/config/vision_config.yaml"/>
+
+  <!-- task_text 为空时，智能分拣 node 会等待语音识别结果 -->
+  <arg name="task_text" default=""/>
+
+  <!-- 语音音频路径。为空时，可以运行后通过 /voice_audio_path topic 输入 -->
+  <arg name="audio_path" default=""/>
+
+  <!-- Whisper 模型：tiny/base/small/medium/large -->
+  <arg name="whisper_model" default="base"/>
+
+  <!-- 语音识别输出 topic -->
+  <arg name="task_text_topic" default="/voice_task_text"/>
+
+  <!-- 等待语音任务的超时时间。0 表示一直等待 -->
+  <arg name="task_wait_timeout" default="0.0"/>
+
+  <!-- 如果语音等待失败，使用该 fallback 命令 -->
+  <arg name="fallback_task_text" default="把最左边的蓝色方块放到A区"/>
+
+  <!-- ========================= -->
+  <!-- LLM 配置 -->
+  <!-- ========================= -->
+  <arg name="use_llm" default="true"/>
+  <arg name="llm_url" default="http://127.0.0.1:8910/v1"/>
+  <arg name="llm_model" default="DeepSeek-R1-Distill-Qwen-7B"/>
+  <arg name="llm_timeout" default="15.0"/>
+
+  <!-- ========================= -->
+  <!-- YOLO-World 配置 -->
+  <!-- ========================= -->
+  <arg name="yolo_model_path"
+       default="$(find sagittarius_object_color_detector)/models/yolov8s-worldv2.pt"/>
+  <arg name="yolo_conf_thres" default="0.35"/>
+  <arg name="min_area" default="1500"/>
+  <arg name="show_debug" default="true"/>
+  <arg name="auto_download_model" default="true"/>
+
+  <!-- ========================= -->
+  <!-- 语音识别 node -->
+  <!-- ========================= -->
+  <node pkg="sagittarius_object_color_detector"
+        type="voice_task_input.py"
+        name="voice_task_input_node"
+        output="screen">
+
+    <param name="audio_path" value="$(arg audio_path)"/>
+    <param name="audio_path_topic" value="/voice_audio_path"/>
+    <param name="task_text_topic" value="$(arg task_text_topic)"/>
+    <param name="model_name" value="$(arg whisper_model)"/>
+    <param name="language" value="zh"/>
+    <param name="keep_alive" value="true"/>
+
+    <!-- 如果 Whisper 识别为空，允许在终端手动输入任务 -->
+    <param name="terminal_fallback" value="true"/>
+    <param name="terminal_prompt" value="语音识别为空，请手动输入任务："/>
+
+  </node>
+
+  <!-- ========================= -->
+  <!-- 智能分拣主程序 -->
+  <!-- ========================= -->
+  <node pkg="sagittarius_object_color_detector"
+        type="llm_safe_sort_demo_planningscene_api_voice.py"
+        name="llm_safe_sort_node"
+        output="screen">
+
+    <param name="vision_config" value="$(arg vision_config)"/>
+    <param name="arm_name" value="$(arg robot_name)"/>
+
+    <!-- 不为空则直接使用；为空则等待 /voice_task_text -->
+    <param name="task_text" value="$(arg task_text)"/>
+    <param name="task_text_topic" value="$(arg task_text_topic)"/>
+    <param name="task_wait_timeout" value="$(arg task_wait_timeout)"/>
+    <param name="fallback_task_text" value="$(arg fallback_task_text)"/>
+
+    <param name="use_llm" value="$(arg use_llm)"/>
+    <param name="llm_url" value="$(arg llm_url)"/>
+    <param name="llm_model" value="$(arg llm_model)"/>
+    <param name="llm_timeout" value="$(arg llm_timeout)"/>
+
+    <param name="yolo_model_path" value="$(arg yolo_model_path)"/>
+    <param name="yolo_conf_thres" value="$(arg yolo_conf_thres)"/>
+    <param name="min_area" value="$(arg min_area)"/>
+    <param name="show_debug" value="$(arg show_debug)"/>
+    <param name="auto_download_model" value="$(arg auto_download_model)"/>
+
+  </node>
+
+</launch>
